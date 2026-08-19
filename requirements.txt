@@ -1,0 +1,8 @@
+# Python dependencies for the POD5 container layer and analysis tools.
+# The codec core (src/) is pure C99 and needs none of these.
+pod5>=0.3.44        # POD5 access + VBZ codec (lib_pod5)
+pyarrow>=22.0       # zero-copy signal blob location
+numpy>=2.0
+zstandard>=0.25     # skeleton compression + blob diagnostics
+blue-crab>=0.5      # optional: blow5 -> pod5 conversion (SG-NEx data)
+pyflac>=3.0         # optional: FLAC competitor in analysis/benchmark.py

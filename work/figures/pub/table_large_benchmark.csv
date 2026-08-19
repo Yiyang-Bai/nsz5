@@ -1,0 +1,4 @@
+dataset,chemistry,samples_B,uncomp_GB,vbz_GB,zstd_exzd_GB,nsz5_GB,ratio_vs_uncomp_nsz,save_pct_vs_vbz,save_pct_vs_exzd,encode_Ms,decode_Ms
+HG002 Chr22,R10.4.1 DNA,32.32,64.685,28.154,27.504,27.172,2.381,3.49,1.21,47.9,29.2
+HEPG2 RNA002,R9 RNA002,9.50,19.010,8.781,8.627,8.188,2.322,6.75,5.08,49.5,70.3
+RNA004 full,RNA004,69.48,140.550,63.147,62.403,58.149,2.417,7.92,6.82,36.6,77.9

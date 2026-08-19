@@ -1,0 +1,15 @@
+\begin{table}[t]
+\centering
+\caption{File-level compression on three large nanopore datasets (slow5tools v1.3.0 protocol; sizes in gigabytes). Savings are relative to native POD5 (VBZ).}
+\label{tab:large-bench}
+\small
+\begin{tabular}{llrrrrrrr}
+\toprule
+Dataset & Chemistry & Samples (B) & Uncomp. & VBZ & ex-zd & nsz5 & vs VBZ & vs ex-zd \\
+\midrule
+HG002 Chr22 & R10.4.1 DNA & 32.3 & 64.7 & 28.2 & 27.5 & 27.2 & 3.5\% & 1.2\% \\
+HEPG2 RNA002 & R9 RNA002 & 9.5 & 19.0 & 8.8 & 8.6 & 8.2 & 6.8\% & 5.1\% \\
+RNA004 full & RNA004 & 69.5 & 140.6 & 63.1 & 62.4 & 58.1 & 7.9\% & 6.8\% \\
+\bottomrule
+\end{tabular}
+\end{table}

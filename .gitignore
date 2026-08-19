@@ -1,0 +1,48 @@
+# Python
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Build artifacts
+work/libnsz.so
+work/*.o
+work/test_*
+work/bench_file
+work/bench_batch
+work/train_prior
+
+# Large datasets and benchmark outputs
+data/
+work/sigcomp/
+work/bench_*/
+work/dorado_models/
+work/zstd_env_*/
+work/*.out
+work/*.pod5
+work/*.blow5
+work/*.nsz5
+work/*.bin
+work/*.fastq
+
+# Misc artifacts
+recovered-agent-transcript.jsonl
+tools/slow5tools.tar.gz
+
+# Third-party binaries (download separately)
+tools/slow5tools-v1.3.0/
+tools/dorado/
+
+# Editor / OS
+.cursor/
+*.swp
+.DS_Store
+
+# Keep publication figures and benchmark tables
+!work/figures/
+!work/figures/pub/
+!work/figures/pub/**
+
+# Keep Slurm job scripts
+!work/*.sbatch
