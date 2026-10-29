@@ -165,6 +165,25 @@ def _worker_compress(args):
     return idx, mode, payload
 
 
+def _worker_regen(args):
+    """Decompress-side worker: nsz decode + VBZ re-encode for one blob.
+    Runs the whole per-blob pipeline in the worker so the main process
+    only writes bytes in order."""
+    idx, payload, count, length, mode = args
+    sig = libnsz.decompress(payload, count)
+    blob = bytes(vbz_compress_signal(sig))
+    if mode >= MODE_NSZ_ALT:
+        inner = _wstate["dctx"].decompress(
+            blob, max_output_size=count * 4 + 1024
+        )
+        blob = zstd_backends.compress_level1(
+            _wstate["alt"][mode - MODE_NSZ_ALT], inner
+        )
+    if len(blob) != length:
+        raise ValueError("regenerated blob length mismatch")
+    return idx, blob
+
+
 # --------------------------------------------------------------------- #
 # Container I/O                                                         #
 # --------------------------------------------------------------------- #
@@ -192,7 +211,17 @@ def auto_prior(pod5_path):
 def compress_file(pod5_path, nsz5_path, prior_path="auto", threads=1):
     t0 = time.monotonic()
     raw = Path(pod5_path).read_bytes()
-    sha = hashlib.sha256(raw).digest()
+
+    # hash the input in the background; it only needs to be ready at
+    # container-write time, after all blobs are compressed
+    sha_box = {}
+
+    def _hash_raw():
+        sha_box["sha"] = hashlib.sha256(raw).digest()
+
+    import threading
+    hasher_thread = threading.Thread(target=_hash_raw)
+    hasher_thread.start()
 
     if prior_path == "auto":
         prior_path = auto_prior(pod5_path)
@@ -249,7 +278,15 @@ def compress_file(pod5_path, nsz5_path, prior_path="auto", threads=1):
         pos = off + length
     parts.append(raw[pos:])
     skeleton = b"".join(parts)
-    skeleton_z = zstandard.ZstdCompressor(level=19).compress(skeleton)
+    # multithreaded zstd: the frame differs from single-threaded output but
+    # decompresses identically; only the raw skeleton bytes matter for
+    # byte-exact reconstruction
+    skeleton_z = zstandard.ZstdCompressor(
+        level=19, threads=threads if threads > 1 else 0
+    ).compress(skeleton)
+
+    hasher_thread.join()
+    sha = sha_box["sha"]
 
     with open(nsz5_path, "wb") as f:
         f.write(NSZ5_MAGIC)
@@ -376,84 +413,116 @@ def decompress_file(nsz5_path, pod5_path, threads=1):
             skel_pos = 0
             out_pos = 0
             total_samples = 0
-            GROUP = 2048
+            GROUP = 8192
             dctx = zstandard.ZstdDecompressor()
             rec_pos = meta["records_pos"]
             prev_end = 0
             done = 0
 
-            with open(pod5_path, "wb") as outf:
-                while done < blob_count:
-                    grp, rec_pos, prev_end = _read_record_group(
-                        mm, rec_pos, min(GROUP, blob_count - done),
-                        alt_versions, orig_size, prev_end,
-                    )
-                    nsz_in_grp = [
-                        (j, r) for j, r in enumerate(grp) if r[3] != MODE_VERBATIM
+            pool = None
+            if threads > 1:
+                pool = mp.Pool(threads, initializer=_worker_init,
+                               initargs=(meta["prior_bytes"], alt_versions))
+
+            done_read = 0
+
+            def fetch_group():
+                """Read the next record group and (if parallel) submit its
+                blob regeneration to the pool immediately, so workers crunch
+                group k+1 while the main process writes group k."""
+                nonlocal rec_pos, prev_end, done_read
+                if done_read >= blob_count:
+                    return None
+                grp, new_pos, new_prev = _read_record_group(
+                    mm, rec_pos, min(GROUP, blob_count - done_read),
+                    alt_versions, orig_size, prev_end,
+                )
+                rec_pos, prev_end = new_pos, new_prev
+                done_read += len(grp)
+                async_res = None
+                if pool is not None:
+                    items = [
+                        (j, mm[r[4] : r[4] + r[5]], r[2], r[1], r[3])
+                        for j, r in enumerate(grp) if r[3] != MODE_VERBATIM
                     ]
-                    sigs = {}
-                    if nsz_in_grp:
-                        if threads > 1 and len(nsz_in_grp) > 1:
-                            payloads = [
-                                mm[r[4] : r[4] + r[5]] for _, r in nsz_in_grp
-                            ]
-                            counts = [r[2] for _, r in nsz_in_grp]
-                            concat = libnsz.decompress_batch(
-                                payloads, counts, threads
-                            )
-                            cum = 0
-                            for (j, r), c in zip(nsz_in_grp, counts):
-                                sigs[j] = concat[cum : cum + c]
-                                cum += c
-                        else:
-                            for j, r in nsz_in_grp:
+                    if items:
+                        async_res = pool.map_async(
+                            _worker_regen, items, chunksize=32
+                        )
+                return grp, async_res
+
+            try:
+                with open(pod5_path, "wb") as outf:
+                    cur = fetch_group()
+                    while cur is not None:
+                        nxt = fetch_group()  # prefetch: workers start early
+                        grp, async_res = cur
+
+                        blobs = {}
+                        if async_res is not None:
+                            for j, blob in async_res.get():
+                                blobs[j] = blob
+                        elif pool is None:
+                            for j, r in enumerate(grp):
+                                if r[3] == MODE_VERBATIM:
+                                    continue
                                 payload = mm[r[4] : r[4] + r[5]]
-                                sigs[j] = libnsz.decompress(payload, r[2])
+                                sig = libnsz.decompress(payload, r[2])
+                                blob = bytes(vbz_compress_signal(sig))
+                                if r[3] >= MODE_NSZ_ALT:
+                                    inner = dctx.decompress(
+                                        blob, max_output_size=r[2] * 4 + 1024
+                                    )
+                                    blob = zstd_backends.compress_level1(
+                                        alt_versions[r[3] - MODE_NSZ_ALT],
+                                        inner,
+                                    )
+                                if len(blob) != r[1]:
+                                    raise ValueError(
+                                        "regenerated blob length mismatch"
+                                    )
+                                blobs[j] = blob
 
-                    for j, record in enumerate(grp):
-                        off, length, count, mode, payload_off, payload_len = record
-                        gap = off - out_pos
-                        if gap:
-                            chunk = skeleton[skel_pos : skel_pos + gap]
-                            outf.write(chunk)
-                            hasher.update(chunk)
-                            skel_pos += gap
-                            out_pos += gap
+                        for j, record in enumerate(grp):
+                            off, length, count, mode, payload_off, \
+                                payload_len = record
+                            gap = off - out_pos
+                            if gap:
+                                chunk = skeleton[skel_pos : skel_pos + gap]
+                                outf.write(chunk)
+                                hasher.update(chunk)
+                                skel_pos += gap
+                                out_pos += gap
 
-                        if mode == MODE_VERBATIM:
-                            blob = mm[payload_off : payload_off + payload_len]
-                        else:
-                            sig = sigs[j]
-                            blob = bytes(vbz_compress_signal(sig))
-                            if mode >= MODE_NSZ_ALT:
-                                inner = dctx.decompress(
-                                    blob, max_output_size=count * 4 + 1024
-                                )
-                                blob = zstd_backends.compress_level1(
-                                    alt_versions[mode - MODE_NSZ_ALT], inner
-                                )
-                            if len(blob) != length:
-                                raise ValueError(
-                                    "regenerated blob length mismatch"
-                                )
-                        outf.write(blob)
-                        hasher.update(blob)
-                        out_pos += length
-                        total_samples += count
+                            if mode == MODE_VERBATIM:
+                                blob = mm[payload_off : payload_off + payload_len]
+                            else:
+                                blob = blobs[j]
+                            outf.write(blob)
+                            hasher.update(blob)
+                            out_pos += length
+                            total_samples += count
 
-                    done += len(grp)
-                    if done % 50000 == 0 or done == blob_count:
-                        print(f"  {done}/{blob_count} blobs...", flush=True)
+                        prev_done = done
+                        done += len(grp)
+                        if done // 50000 > prev_done // 50000 \
+                                or done == blob_count:
+                            print(f"  {done}/{blob_count} blobs...", flush=True)
+                        cur = nxt
 
-                if rec_pos != len(mm):
-                    raise ValueError("trailing bytes in NSZ5 container")
+                    if rec_pos != len(mm):
+                        raise ValueError("trailing bytes in NSZ5 container")
 
-                tail = len(skeleton) - skel_pos
-                if tail:
-                    chunk = skeleton[skel_pos:]
-                    outf.write(chunk)
-                    hasher.update(chunk)
-                    out_pos += tail
+                    tail = len(skeleton) - skel_pos
+                    if tail:
+                        chunk = skeleton[skel_pos:]
+                        outf.write(chunk)
+                        hasher.update(chunk)
+                        out_pos += tail
+            finally:
+                if pool is not None:
+                    pool.close()
+                    pool.join()
 
             if out_pos != orig_size:
                 raise ValueError("reconstructed size mismatch")

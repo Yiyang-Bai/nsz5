@@ -34,6 +34,9 @@ tools/slow5tools.tar.gz
 tools/slow5tools-v1.3.0/
 tools/dorado/
 
+# Tutorial outputs
+examples/out/
+
 # Editor / OS
 .cursor/
 *.swp
